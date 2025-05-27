@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,11 +12,16 @@ import (
 	"github.com/slack-go/slack"
 )
 
+type StoreTS interface {
+	Get() (string, error)
+	Set(string) error
+}
+
 type API struct {
 	Client *slack.Client // slack.New(token, slack.OptionHTTPClient(httpCLient))
 	Limit  int
 
-	lastMentionTs string // could be in a state outside of mem for restarts
+	StoreTS StoreTS // for storing the last mention timestamp
 }
 
 type Mention struct {
@@ -24,12 +30,41 @@ type Mention struct {
 	Text      string
 }
 
+type FileStoreTS struct {
+	path string
+}
+
+func NewFileStoreTS() *FileStoreTS {
+	return &FileStoreTS{
+		path: "/tmp/slackask_last_mention_ts",
+	}
+}
+
+func (s *FileStoreTS) Get() (string, error) {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	return string(data), nil
+}
+
+func (s *FileStoreTS) Set(ts string) error {
+	return os.WriteFile(s.path, []byte(ts), 0644)
+}
+
 // Should use https://api.slack.com/scopes/app_mentions:read https://api.slack.com/events/app_mention
 // But requires a callback URL.
 // Leverage api + lastMentionTs for now.
 //
 // Mentions returns a list of new mentions.
 func (api *API) Mentions(ctx context.Context, channelIDs []string, user string) ([]Mention, error) {
+	lastMentionTs, err := api.StoreTS.Get()
+	if err != nil {
+		return nil, fmt.Errorf("get last mention timestamp: %w", err)
+	}
 	// TODO should handle concurrent access to not return the same mentions.
 	mentions := []Mention{}
 	for _, channelID := range channelIDs {
@@ -50,10 +85,10 @@ func (api *API) Mentions(ctx context.Context, channelIDs []string, user string) 
 		})
 
 		for _, msg := range messages {
-			if api.lastMentionTs == "" {
-				api.lastMentionTs = "0"
+			if lastMentionTs == "" {
+				lastMentionTs = "0"
 			}
-			lastTs, err := strconv.ParseFloat(api.lastMentionTs, 64)
+			lastTs, err := strconv.ParseFloat(lastMentionTs, 64)
 			if err != nil {
 				return nil, fmt.Errorf("parse last mention timestamp: %w", err)
 			}
@@ -77,9 +112,12 @@ func (api *API) Mentions(ctx context.Context, channelIDs []string, user string) 
 				Text:      msg.Text,
 			})
 			if ts > lastTs {
-				api.lastMentionTs = msg.Timestamp
+				lastMentionTs = msg.Timestamp
 			}
 		}
+	}
+	if err := api.StoreTS.Set(lastMentionTs); err != nil {
+		return nil, fmt.Errorf("set last mention timestamp: %w", err)
 	}
 	// sort accross channels
 	sort.Slice(mentions, func(i, j int) bool {

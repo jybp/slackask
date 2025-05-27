@@ -10,13 +10,10 @@ import (
 
 // https://ai.google.dev/gemini-api/docs/quickstart?lang=python&authuser=1#go
 
-const (
-	baseURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-)
-
 type API struct {
-	Client *http.Client
-	ApiKey string
+	BaseURL string
+	Client  *http.Client
+	ApiKey  string
 }
 
 type requestBody struct {
@@ -53,7 +50,7 @@ type responseBody struct {
 //	  }'
 //
 // Prompt sends a text prompt to the Gemini API and returns the response
-func (c *API) Prompt(ctx context.Context, text string) (string, error) {
+func (api *API) Prompt(ctx context.Context, text string) (string, error) {
 	reqBody := requestBody{
 		Contents: []struct {
 			Parts []struct {
@@ -73,13 +70,13 @@ func (c *API) Prompt(ctx context.Context, text string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
-	url := fmt.Sprintf("%s?key=%s", baseURL, c.ApiKey)
+	url := fmt.Sprintf("%s?key=%s", api.BaseURL, api.ApiKey)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.Client.Do(req)
+	resp, err := api.Client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("do request: %w", err)
 	}
