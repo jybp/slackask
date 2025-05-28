@@ -23,8 +23,12 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("error: %v", err)
+	for {
+		if err := run(); err != nil {
+			log.Printf("error in run: %v", err)
+		}
+		log.Printf("waiting 10 seconds before next run")
+		time.Sleep(10 * time.Second)
 	}
 }
 
@@ -102,16 +106,17 @@ func run() error {
 		return fmt.Errorf("no allowed user IDs specified in SLACK_ALLOWED_USER_IDS")
 	}
 
+	// mentions = mentions[:1]
 	for _, mention := range mentions {
 
 		if !strings.Contains(strings.Join(allowedUserIDs, ","), mention.SenderUserID) {
+			log.Printf("skipping mention from user %s: %v", mention.SenderUserID, allowedUserIDs)
 			if err := slackAPI.Reply(ctx, mention, "https://media.tenor.com/-7miMPOSr9EAAAAM/who-da-fook-conor-mcgregor.gif"); err != nil && err.Error() != "cannot_reply_to_message" {
-				return fmt.Errorf("reply: %w", err)
+				// return fmt.Errorf("reply to mention %s with response whoisthatguy: %w", mention, err)
 			}
 			if err := storeTS.Set(mention.Timestamp); err != nil {
 				return fmt.Errorf("set last mention timestamp: %w", err)
 			}
-			log.Printf("skipping mention from user %s: %v", mention.SenderUserID, allowedUserIDs)
 			continue
 		}
 
@@ -145,7 +150,7 @@ The API specs are:
 		}
 
 		if err := slackAPI.Reply(ctx, mention, response); err != nil && err.Error() != "cannot_reply_to_message" {
-			return fmt.Errorf("reply: %w", err)
+			return fmt.Errorf("reply to mention %s with response %s: %w", mention, response, err)
 		}
 		if err := storeTS.Set(mention.Timestamp); err != nil {
 			return fmt.Errorf("set last mention timestamp: %w", err)
