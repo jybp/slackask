@@ -18,9 +18,10 @@ type API struct {
 }
 
 type Mention struct {
-	Channel   string
-	Timestamp string
-	Text      string
+	SenderUserID string
+	Channel      string
+	Timestamp    string
+	Text         string
 }
 
 // Should use https://api.slack.com/scopes/app_mentions:read https://api.slack.com/events/app_mention
@@ -87,9 +88,10 @@ func (api *API) Mentions(ctx context.Context, channelIDs []string, user string, 
 				}
 				log.Printf("adding mention %s: %s", msg.Timestamp, msg.Text)
 				mentions = append(mentions, Mention{
-					Channel:   channelID,
-					Timestamp: msg.Timestamp,
-					Text:      msg.Text,
+					SenderUserID: msg.User,
+					Channel:      channelID,
+					Timestamp:    msg.Timestamp,
+					Text:         msg.Text,
 				})
 				if ts > lastTs {
 					lastMentionTs = msg.Timestamp

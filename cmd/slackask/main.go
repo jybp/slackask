@@ -96,7 +96,25 @@ func run() error {
 		log.Printf("no mentions")
 		return nil
 	}
+
+	allowedUserIDs := strings.Split(os.Getenv("SLACK_ALLOWED_USER_IDS"), ",")
+	if len(allowedUserIDs) == 0 {
+		return fmt.Errorf("no allowed user IDs specified in SLACK_ALLOWED_USER_IDS")
+	}
+
 	for _, mention := range mentions {
+
+		if !strings.Contains(strings.Join(allowedUserIDs, ","), mention.SenderUserID) {
+			if err := slackAPI.Reply(ctx, mention, "https://media.tenor.com/-7miMPOSr9EAAAAM/who-da-fook-conor-mcgregor.gif"); err != nil && err.Error() != "cannot_reply_to_message" {
+				return fmt.Errorf("reply: %w", err)
+			}
+			if err := storeTS.Set(mention.Timestamp); err != nil {
+				return fmt.Errorf("set last mention timestamp: %w", err)
+			}
+			log.Printf("skipping mention from user %s: %v", mention.SenderUserID, allowedUserIDs)
+			continue
+		}
+
 		var prompt = `
 You are a helpful slack assistant replying to a user's message.
 Today the date is %s.
