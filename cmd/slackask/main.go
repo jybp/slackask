@@ -42,15 +42,8 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 
-	httpClient := &http.Client{
-		Transport: httpthrottle.Default(
-			// https://ai.google.dev/gemini-api/docs/rate-limits?authuser=1#free-tier
-			rate.NewLimiter(rate.Limit(15/60.0), 1), // 15 RPM
-		),
-	}
-
 	slackAPI := slack.API{
-		Client:        slackgo.New(os.Getenv("SLACK_API_TOKEN"), slackgo.OptionHTTPClient(httpClient)),
+		Client:        slackgo.New(os.Getenv("SLACK_API_TOKEN"), slackgo.OptionHTTPClient(http.DefaultClient)),
 		MessagesLimit: 10,
 		RepliesLimit:  10,
 	}
@@ -63,14 +56,20 @@ func run() error {
 		}
 	}
 
+	llmClient := &http.Client{
+		Transport: httpthrottle.Default(
+			// https://ai.google.dev/gemini-api/docs/rate-limits?authuser=1#free-tier
+			rate.NewLimiter(rate.Limit(15/60.0), 1), // 15 RPM
+		),
+	}
 	geminiAPI := gemini.API{
-		Client:  httpClient,
+		Client:  llmClient,
 		BaseURL: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
 		ApiKey:  os.Getenv("GEMINI_API_KEY"),
 	}
 
 	apiClient := apiclient.Client{
-		Client: httpClient,
+		Client: http.DefaultClient,
 		Token:  os.Getenv("KILN_API_TOKEN"),
 	}
 
