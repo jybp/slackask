@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,16 +11,10 @@ import (
 	"github.com/slack-go/slack"
 )
 
-type StoreTS interface {
-	Get() (string, error)
-	Set(string) error
-}
-
 type API struct {
-	Client *slack.Client // slack.New(token, slack.OptionHTTPClient(httpCLient))
-	Limit  int
-
-	StoreTS StoreTS // for storing the last mention timestamp
+	Client        *slack.Client // slack.New(token, slack.OptionHTTPClient(httpCLient))
+	MessagesLimit int
+	RepliesLimit  int
 }
 
 type Mention struct {
@@ -30,47 +23,20 @@ type Mention struct {
 	Text      string
 }
 
-type FileStoreTS struct {
-	path string
-}
-
-func NewFileStoreTS() *FileStoreTS {
-	return &FileStoreTS{
-		path: "/tmp/slackask_last_mention_ts",
-	}
-}
-
-func (s *FileStoreTS) Get() (string, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("read file: %w", err)
-	}
-	return string(data), nil
-}
-
-func (s *FileStoreTS) Set(ts string) error {
-	return os.WriteFile(s.path, []byte(ts), 0644)
-}
-
 // Should use https://api.slack.com/scopes/app_mentions:read https://api.slack.com/events/app_mention
 // But requires a callback URL.
 // Leverage api + lastMentionTs for now.
 //
 // Mentions returns a list of new mentions.
-func (api *API) Mentions(ctx context.Context, channelIDs []string, user string) ([]Mention, error) {
-	lastMentionTs, err := api.StoreTS.Get()
-	if err != nil {
-		return nil, fmt.Errorf("get last mention timestamp: %w", err)
-	}
+func (api *API) Mentions(ctx context.Context, channelIDs []string, user string, lastMentionTs string) ([]Mention, error) {
+	botMention := fmt.Sprintf("<@%s>", user)
+
 	// TODO should handle concurrent access to not return the same mentions.
 	mentions := []Mention{}
 	for _, channelID := range channelIDs {
 		resp, err := api.Client.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{
 			ChannelID: channelID,
-			Limit:     api.Limit,
+			Limit:     api.MessagesLimit,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("GetConversationHistoryContext(,%s): %w", channelID, err)
@@ -85,39 +51,51 @@ func (api *API) Mentions(ctx context.Context, channelIDs []string, user string) 
 		})
 
 		for _, msg := range messages {
-			if lastMentionTs == "" {
-				lastMentionTs = "0"
-			}
-			lastTs, err := strconv.ParseFloat(lastMentionTs, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse last mention timestamp: %w", err)
-			}
-			ts, err := strconv.ParseFloat(msg.Timestamp, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse timestamp: %w", err)
-			}
-			if ts <= lastTs {
-				continue
-			}
-			// U0LAN0Z89 -> <@U0LAN0Z89>
-			botMention := fmt.Sprintf("<@%s>", user)
 			if msg.Text == "" || msg.Text == botMention || !strings.Contains(msg.Text, botMention) {
 				log.Printf("skipping mention: %s %s", msg.Timestamp, msg.Text)
 				continue
 			}
-			log.Printf("adding mention %s: %s", msg.Timestamp, msg.Text)
-			mentions = append(mentions, Mention{
-				Channel:   channelID,
-				Timestamp: msg.Timestamp,
-				Text:      msg.Text,
-			})
-			if ts > lastTs {
-				lastMentionTs = msg.Timestamp
+			msgWithReplies := []slack.Message{msg}
+			if msg.ReplyCount > 0 {
+				replies, _, _, _ := api.Client.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{
+					ChannelID: channelID,
+					Timestamp: msg.Timestamp,
+					Limit:     api.RepliesLimit,
+				})
+				log.Printf("found %d replies for %s", len(replies), msg.Timestamp)
+				msgWithReplies = append(msgWithReplies, replies...)
+			}
+			for _, msg := range msgWithReplies {
+				if msg.Text == "" || msg.Text == botMention || !strings.Contains(msg.Text, botMention) {
+					log.Printf("skipping mention: %s %s", msg.Timestamp, msg.Text)
+					continue
+				}
+				if lastMentionTs == "" {
+					lastMentionTs = "0"
+				}
+				lastTs, err := strconv.ParseFloat(lastMentionTs, 64)
+				if err != nil {
+					return nil, fmt.Errorf("parse last mention timestamp: %w", err)
+				}
+				ts, err := strconv.ParseFloat(msg.Timestamp, 64)
+				if err != nil {
+					return nil, fmt.Errorf("parse timestamp: %w", err)
+				}
+				if ts <= lastTs {
+					log.Printf("skipping mention: %s %s", msg.Timestamp, msg.Text)
+					continue
+				}
+				log.Printf("adding mention %s: %s", msg.Timestamp, msg.Text)
+				mentions = append(mentions, Mention{
+					Channel:   channelID,
+					Timestamp: msg.Timestamp,
+					Text:      msg.Text,
+				})
+				if ts > lastTs {
+					lastMentionTs = msg.Timestamp
+				}
 			}
 		}
-	}
-	if err := api.StoreTS.Set(lastMentionTs); err != nil {
-		return nil, fmt.Errorf("set last mention timestamp: %w", err)
 	}
 	// sort accross channels
 	sort.Slice(mentions, func(i, j int) bool {
@@ -125,6 +103,8 @@ func (api *API) Mentions(ctx context.Context, channelIDs []string, user string) 
 		jts, _ := strconv.ParseFloat(mentions[j].Timestamp, 64)
 		return its < jts
 	})
+
+	log.Printf("found %d mentions to reply to", len(mentions))
 	return mentions, nil
 }
 
