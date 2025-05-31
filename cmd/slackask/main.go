@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	_ "embed"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,34 +24,58 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func main() {
-	for {
-		if err := run(); err != nil {
-			log.Printf("error in run: %v", err)
-		}
-		log.Printf("waiting 10 seconds before next run")
-		time.Sleep(10 * time.Second)
-	}
-}
-
+// specs.json should be placed in the cmd/slackask directory
+// It contains the OpenAPI specification for the APIs the bot can query
+//
+//go:embed specs.json
 var specs string
 
+var (
+	restartDuration time.Duration
+)
+
 func init() {
-	specsb, err := os.ReadFile("spec.json")
-	if err != nil {
-		panic(err)
-	}
-	specs = string(specsb)
+	flag.DurationVar(&restartDuration, "restart", 0, "restart duration (e.g. 10s, 1m). If not set, runs once")
+	flag.Parse()
 }
 
-func run() error {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	log.Printf("specs: %s", specs)
+	for {
+		if err := run(ctx); err != nil {
+			log.Printf("error in run: %v", err)
+		}
+		if restartDuration == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(restartDuration):
+		}
+	}
+}
+
+func run(ctx context.Context) error {
+
+	messagesLimit, repliesLimit := 10, 10
+	if value := os.Getenv("SLACK_MESSAGES_LIMIT"); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			messagesLimit = intValue
+		}
+	}
+	if value := os.Getenv("SLACK_REPLIES_LIMIT"); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			repliesLimit = intValue
+		}
+	}
 
 	slackAPI := slack.API{
 		Client:        slackgo.New(os.Getenv("SLACK_API_TOKEN"), slackgo.OptionHTTPClient(http.DefaultClient)),
-		MessagesLimit: 10,
-		RepliesLimit:  10,
+		MessagesLimit: messagesLimit,
+		RepliesLimit:  repliesLimit,
 	}
 
 	errorSlack := func(mention slack.Mention, err error) {
@@ -60,24 +86,40 @@ func run() error {
 		}
 	}
 
+	geminiRateLimit := 15.0 / 60.0 // 15 RPM by default
+	if value := os.Getenv("GEMINI_RATE_LIMIT"); value != "" {
+		if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
+			geminiRateLimit = floatValue
+		}
+	}
+
+	geminiModelURL := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+	if value := os.Getenv("GEMINI_MODEL_URL"); value != "" {
+		geminiModelURL = value
+	}
+
 	llmClient := &http.Client{
 		Transport: httpthrottle.Default(
-			// https://ai.google.dev/gemini-api/docs/rate-limits?authuser=1#free-tier
-			rate.NewLimiter(rate.Limit(15/60.0), 1), // 15 RPM
+			rate.NewLimiter(rate.Limit(geminiRateLimit), 1),
 		),
 	}
 	geminiAPI := gemini.API{
 		Client:  llmClient,
-		BaseURL: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+		BaseURL: geminiModelURL,
 		ApiKey:  os.Getenv("GEMINI_API_KEY"),
 	}
-
 	apiClient := apiclient.Client{
 		Client: http.DefaultClient,
-		Token:  os.Getenv("KILN_API_TOKEN"),
+		Token:  os.Getenv("API_TOKEN"),
 	}
 
-	const maxSteps = 5
+	maxSteps := 5
+	if value := os.Getenv("MAX_STEPS"); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			maxSteps = intValue
+		}
+	}
+
 	chain := llmchain.Chain{
 		LLM:      &geminiAPI,
 		API:      &apiClient,
@@ -101,18 +143,17 @@ func run() error {
 		return nil
 	}
 
-	allowedUserIDs := strings.Split(os.Getenv("SLACK_ALLOWED_USER_IDS"), ",")
-	if len(allowedUserIDs) == 0 {
-		return fmt.Errorf("no allowed user IDs specified in SLACK_ALLOWED_USER_IDS")
+	var allowedUserIDs []string
+	if len(os.Getenv("SLACK_REPLY_TO")) > 0 {
+		allowedUserIDs = strings.Split(os.Getenv("SLACK_REPLY_TO"), ",")
 	}
 
-	// mentions = mentions[:1]
 	for _, mention := range mentions {
 
-		if !strings.Contains(strings.Join(allowedUserIDs, ","), mention.SenderUserID) {
+		if len(allowedUserIDs) > 0 && !strings.Contains(strings.Join(allowedUserIDs, ","), mention.SenderUserID) {
 			log.Printf("skipping mention from user %s: %v", mention.SenderUserID, allowedUserIDs)
 			if err := slackAPI.Reply(ctx, mention, "https://media.tenor.com/-7miMPOSr9EAAAAM/who-da-fook-conor-mcgregor.gif"); err != nil && err.Error() != "cannot_reply_to_message" {
-				// return fmt.Errorf("reply to mention %s with response whoisthatguy: %w", mention, err)
+				return fmt.Errorf("reply to mention %s with response whoisthatguy: %w", mention, err)
 			}
 			if err := storeTS.Set(mention.Timestamp); err != nil {
 				return fmt.Errorf("set last mention timestamp: %w", err)
